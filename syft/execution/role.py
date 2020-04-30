@@ -12,6 +12,7 @@ from syft.execution.action import Action
 from syft.execution.placeholder import PlaceHolder
 from syft.execution.placeholder_id import PlaceholderId
 from syft.execution.state import State
+from syft.execution.translation import TranslationTarget
 from syft.generic.frameworks.types import FrameworkTensor
 from syft.generic.object import AbstractObject
 from syft.generic.object_storage import ObjectStorage
@@ -34,6 +35,7 @@ class Role:
         output_placeholder_ids: Tuple[int, str] = None,
         # General kwargs
         id: Union[str, int] = None,
+        operations: Dict[str, List[Action]] = None,
     ):
         self.id = id or sy.ID_PROVIDER.pop()
 
@@ -47,6 +49,7 @@ class Role:
         self.output_placeholder_ids = output_placeholder_ids or ()
 
         self.state = state or State()
+        self.operations = operations or {}
 
     def input_placeholders(self):
         return [self.placeholders[id_] for id_ in self.input_placeholder_ids]

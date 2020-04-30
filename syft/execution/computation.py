@@ -36,6 +36,9 @@ class ComputationAction(Action):
         self.kwargs = kwargs_
         self.return_ids = return_ids
 
+    def copy(self):
+        return ComputationAction(self.name, self.target, self.args, self.kwargs, self.return_ids)
+
     @property
     def contents(self):
         """Return a tuple with the contents of the action (backwards compatability)
