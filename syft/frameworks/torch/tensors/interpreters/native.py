@@ -1,6 +1,5 @@
 import math
-from typing import List
-from typing import Union
+from typing import Union, Tuple, List
 import warnings
 import weakref
 
@@ -15,6 +14,7 @@ from syft.messaging.message import TensorCommandMessage
 from syft.generic.frameworks.types import FrameworkTensor
 from syft.generic.tensor import AbstractTensor
 from syft.generic.pointers.pointer_tensor import PointerTensor
+from syft.generic.utils import memorize
 from syft.workers.base import BaseWorker
 
 from syft.exceptions import PureFrameworkTensorFoundError
@@ -272,6 +272,12 @@ class TorchTensor(AbstractTensor):
         else:
             self._id = new_id
 
+    def get_class_attributes(self):
+        """
+        Return class attributes for torch tensors
+        """
+        return {"type": self.dtype}
+
     def _is_parameter(self):
         """
         Utility method to test if the tensor is in fact a Parameter
@@ -367,10 +373,9 @@ class TorchTensor(AbstractTensor):
 
         return response
 
-    def _get_response(cmd, args_, kwargs_):
-        """
-            Return the evaluation of the cmd string parameter
-        """
+    @staticmethod
+    @memorize
+    def _get_method(cmd):
         module = syft.local_worker.hook
         segments = cmd.split(".")
         submodules = segments[:-1]
@@ -383,6 +388,15 @@ class TorchTensor(AbstractTensor):
             command_method = getattr(module, f"native_{command}")
         except AttributeError:  # the function isn't overloaded
             command_method = getattr(module, command)
+
+        return command_method
+
+    @staticmethod
+    def _get_response(cmd, args_, kwargs_):
+        """
+            Return the evaluation of the cmd string parameter
+        """
+        command_method = TorchTensor._get_method(cmd)
 
         if isinstance(args_, tuple):
             response = command_method(*args_, **kwargs_)
@@ -557,7 +571,6 @@ class TorchTensor(AbstractTensor):
         self,
         location: BaseWorker = None,
         id_at_location: (str or int) = None,
-        register: bool = False,
         owner: BaseWorker = None,
         ptr_id: (str or int) = None,
         garbage_collect_data: bool = True,
@@ -583,7 +596,7 @@ class TorchTensor(AbstractTensor):
             shape = self.shape
 
         ptr = syft.PointerTensor.create_pointer(
-            self, location, id_at_location, register, owner, ptr_id, garbage_collect_data, shape
+            self, location, id_at_location, owner, ptr_id, garbage_collect_data, shape
         )
 
         return ptr
@@ -701,15 +714,25 @@ class TorchTensor(AbstractTensor):
         Returns:
             A pointer to the worker location
         """
-        self.child = self.child.move(location, requires_grad)
+        new_ptr = self.child.move(location, requires_grad)
         # We get the owner from self.child because the owner of a wrapper is
         # not reliable and sometimes end up being the syft.local_worker
         self.child.owner.register_obj(self)
+        if isinstance(new_ptr, PointerTensor):
+            return new_ptr.wrap()
+        else:
+            return new_ptr
+
+    def move_(self, location: BaseWorker, requires_grad: bool = False):
+        """
+        Inplace version of move
+        """
+        new_ptr = self.move(location, requires_grad)
+        self.child = new_ptr
         return self
 
     def remote_send(self, location):
-        self.child.remote_send(location)
-        return self
+        return self.child.remote_send(location).wrap()
 
     def attr(self, attr_name):
         """"""
@@ -763,15 +786,13 @@ class TorchTensor(AbstractTensor):
 
     float_precision_ = float_prec_
 
-    def private_tensor(
-        self, *args, allowed_users: Union[str] = [], no_wrap: bool = False, **kwargs
-    ):
+    def private_tensor(self, *args, allowed_users: Tuple[str], no_wrap: bool = False, **kwargs):
         """
         Convert a tensor or syft tensor to private tensor
 
         Args:
             *args (tuple): args to transmit to the private tensor.
-            allowed_users (Union): Tuple of allowed users.
+            allowed_users (tuple): Tuple of allowed users.
             no_wrap (bool): if True, we don't add a wrapper on top of the private tensor
             **kwargs (dict): kwargs to transmit to the private tensor
         """
@@ -855,6 +876,7 @@ class TorchTensor(AbstractTensor):
     def share(
         self,
         *owners: List[BaseWorker],
+        protocol: str = "snn",
         field: Union[int, None] = None,
         dtype: Union[str, None] = None,
         crypto_provider: Union[BaseWorker, None] = None,
@@ -865,6 +887,7 @@ class TorchTensor(AbstractTensor):
 
         Args:
             owners (list): A list of BaseWorker objects determining who to send shares to.
+            protocol (str): the crypto protocol used to perform the computations ('snn' or 'fss')
             field (int or None): The arithmetic field where live the shares.
             dtype (str or None): The dtype of shares
             crypto_provider (BaseWorker or None): The worker providing the crypto primitives.
@@ -878,7 +901,12 @@ class TorchTensor(AbstractTensor):
                 {"requires_grad": requires_grad} if isinstance(chain, syft.PointerTensor) else {}
             )
             shared_tensor = chain.share(
-                *owners, field=field, dtype=dtype, crypto_provider=crypto_provider, **kwargs_
+                *owners,
+                protocol=protocol,
+                field=field,
+                dtype=dtype,
+                crypto_provider=crypto_provider,
+                **kwargs_,
             )
         else:
             if self.type() == "torch.FloatTensor":
@@ -886,7 +914,11 @@ class TorchTensor(AbstractTensor):
 
             shared_tensor = (
                 syft.AdditiveSharingTensor(
-                    field=field, dtype=dtype, crypto_provider=crypto_provider, owner=self.owner
+                    protocol=protocol,
+                    field=field,
+                    dtype=dtype,
+                    crypto_provider=crypto_provider,
+                    owner=self.owner,
                 )
                 .on(self.copy(), wrap=False)
                 .init_shares(*owners)
